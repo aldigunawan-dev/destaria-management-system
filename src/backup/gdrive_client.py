@@ -1,6 +1,6 @@
 """
 Google Drive Client
-Handles backup uploads to Google Drive using Service Account
+Handles backup uploads to Google Drive using Service Account or OAuth
 """
 
 import logging
@@ -10,13 +10,15 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Callable
 from datetime import datetime
 import io
+import time
 
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials as OAuthCredentials
 from google.auth.exceptions import GoogleAuthError
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseUpload, MediaFileUpload
+from googleapiclient.http import MediaIoBaseUpload, MediaFileUpload, MediaIoBaseDownload
 
 logger = logging.getLogger(__name__)
 
@@ -31,56 +33,99 @@ class GoogleDriveClient:
     - Chunk-based upload with progress tracking
     - Automatic folder structure creation
     - File listing and deletion
+    - Support for Shared Drives (for Service Accounts)
     
     Attributes:
         drive_service: Google Drive API service instance
         folder_id: Minecraft-Backups folder ID
+        shared_drive_id: Optional Shared Drive ID for Service Accounts
     """
     
     # Upload configuration
     SCOPES = ['https://www.googleapis.com/auth/drive']
     CHUNK_SIZE = 256 * 1024 * 1024  # 256 MB chunks for large files
     
-    def __init__(self, credentials_path: str, folder_name: str = "Minecraft-Backups",
-                 progress_callback: Callable = None):
+    def __init__(self, credentials_path: str = None, folder_name: str = "Minecraft-Backups",
+                 folder_id: str = None, shared_drive_id: str = None, progress_callback: Callable = None,
+                 oauth_token_path: str = None):
         """
-        Initialize Google Drive client.
+        Initialize Google Drive client with Service Account or OAuth.
         
         Args:
-            credentials_path: Path to Google Service Account JSON credentials
-            folder_name: Name of backup folder in Google Drive
-            progress_callback: Optional callback for upload progress (callback(progress_percent))
+            credentials_path: Path to Service Account JSON or OAuth credentials
+            folder_name: Name of backup folder in Google Drive (used if folder_id not provided)
+            folder_id: Existing folder ID to use (skips folder creation)
+            shared_drive_id: Optional Shared Drive ID for Service Accounts
+            progress_callback: Optional callback for upload progress
+            oauth_token_path: Path to OAuth token.json file (for user accounts)
             
         Raises:
             FileNotFoundError: If credentials file doesn't exist
             GoogleAuthError: If authentication fails
+            
+        Note:
+            For Workspace accounts: Use oauth_token_path pointing to token.json
+            For Service Accounts: Use credentials_path pointing to service-account.json
         """
-        self.credentials_path = credentials_path
         self.folder_name = folder_name
+        self.shared_drive_id = shared_drive_id
         self.progress_callback = progress_callback
         self.logger = logging.getLogger(__name__)
         
-        # Verify credentials file exists
-        if not os.path.exists(credentials_path):
-            raise FileNotFoundError(f"Credentials file not found: {credentials_path}")
+        # Determine which credentials to use
+        if oauth_token_path and Path(oauth_token_path).exists():
+            # Use OAuth token
+            self.logger.info(f"Using OAuth token: {oauth_token_path}")
+            self._init_oauth(oauth_token_path)
+        elif credentials_path and Path(credentials_path).exists():
+            # Use Service Account
+            self.logger.info(f"Using Service Account: {credentials_path}")
+            self._init_service_account(credentials_path)
+        else:
+            raise FileNotFoundError(
+                f"No valid credentials found.\n"
+                f"Provide either:\n"
+                f"  - oauth_token_path: {oauth_token_path}\n"
+                f"  - credentials_path: {credentials_path}"
+            )
         
-        # Authenticate and build service
-        try:
-            self.credentials = self._load_credentials()
-            self.drive_service = build('drive', 'v3', credentials=self.credentials)
-            self.logger.info("Google Drive client initialized")
-        except GoogleAuthError as e:
-            self.logger.error(f"Google authentication failed: {e}")
-            raise
+        # Get or create folder
+        if folder_id:
+            self.folder_id = folder_id
+            self.logger.info(f"Using existing folder: {folder_id}")
+        else:
+            self.folder_id = self._get_or_create_folder(folder_name)
         
-        # Get or create Minecraft-Backups folder
-        self.folder_id = self._get_or_create_folder(folder_name)
         if not self.folder_id:
             raise RuntimeError(f"Failed to get/create folder: {folder_name}")
     
-    def _load_credentials(self) -> Credentials:
+    def _init_oauth(self, token_path: str):
+        """Initialize with OAuth token."""
+        try:
+            creds = OAuthCredentials.from_authorized_user_file(token_path, self.SCOPES)
+            self.credentials = creds
+            self.drive_service = build('drive', 'v3', credentials=creds)
+            self.logger.info("Google Drive client initialized with OAuth")
+        except Exception as e:
+            self.logger.error(f"Failed to load OAuth token: {e}")
+            raise GoogleAuthError(f"Invalid OAuth token: {e}")
+    
+    def _init_service_account(self, credentials_path: str):
+        """Initialize with Service Account."""
+        try:
+            self.credentials = self._load_credentials(credentials_path)
+            self.drive_service = build('drive', 'v3', credentials=self.credentials)
+            self.logger.info("Google Drive client initialized with Service Account")
+        except GoogleAuthError as e:
+            self.logger.error(f"Google authentication failed: {e}")
+            raise
+    
+    def _load_credentials(self, credentials_path: str) -> Credentials:
         """
         Load service account credentials from JSON file.
+        
+        Args:
+            credentials_path: Path to service account JSON
         
         Returns:
             Credentials object for Google Drive API
@@ -90,10 +135,10 @@ class GoogleDriveClient:
         """
         try:
             credentials = Credentials.from_service_account_file(
-                self.credentials_path,
+                credentials_path,
                 scopes=self.SCOPES
             )
-            self.logger.info(f"Service account credentials loaded: {self.credentials_path}")
+            self.logger.info(f"Service account credentials loaded: {credentials_path}")
             return credentials
         except Exception as e:
             self.logger.error(f"Failed to load credentials: {e}")
@@ -140,7 +185,8 @@ class GoogleDriveClient:
                 q=query,
                 spaces='drive',
                 pageSize=1,
-                fields='files(id, name)'
+                fields='files(id, name)',
+                supportsAllDrives=True
             )
             
             response = self._execute_request(request, f"Search folder '{folder_name}'")
@@ -159,7 +205,8 @@ class GoogleDriveClient:
             
             request = self.drive_service.files().create(
                 body=file_metadata,
-                fields='id'
+                fields='id',
+                supportsAllDrives=True
             )
             
             response = self._execute_request(request, f"Create folder '{folder_name}'")
@@ -192,7 +239,8 @@ class GoogleDriveClient:
                 q=query,
                 spaces='drive',
                 pageSize=1,
-                fields='files(id)'
+                fields='files(id)',
+                supportsAllDrives=True
             )
             
             response = self._execute_request(request, f"Search subfolder '{subfolder_name}'")
@@ -201,6 +249,7 @@ class GoogleDriveClient:
                 return response['files'][0]['id']
             
             # Create subfolder
+            self.logger.info(f"Creating subfolder '{subfolder_name}' under {parent_id}")
             file_metadata = {
                 'name': subfolder_name,
                 'mimeType': 'application/vnd.google-apps.folder',
@@ -209,18 +258,24 @@ class GoogleDriveClient:
             
             request = self.drive_service.files().create(
                 body=file_metadata,
-                fields='id'
+                fields='id',
+                supportsAllDrives=True
             )
             
             response = self._execute_request(request, f"Create subfolder '{subfolder_name}'")
             
-            if response:
-                return response['id']
+            if response and 'id' in response:
+                folder_id = response['id']
+                self.logger.info(f"Subfolder created: {subfolder_name} ({folder_id})")
+                return folder_id
             
+            self.logger.error(f"Failed to create subfolder '{subfolder_name}': no ID in response")
             return None
         
         except Exception as e:
             self.logger.error(f"Error managing subfolder: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def upload_backup(self, server_name: str, backup_id: str, 
@@ -279,7 +334,8 @@ class GoogleDriveClient:
             request = self.drive_service.files().create(
                 body=file_metadata,
                 media_body=media,
-                fields='id, webViewLink'
+                fields='id, webViewLink',
+                supportsAllDrives=True
             )
             
             # Execute upload with progress tracking

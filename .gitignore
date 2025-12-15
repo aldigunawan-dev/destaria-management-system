@@ -81,11 +81,15 @@ credentials.json
 gdrive_credentials.json
 google-service-account.json
 config/google-service-account.json
+config/oauth_credentials.json
+config/gdrive_token.json
 config/notifications.yaml.local
 config/servers.yaml.local
 config/plugins.yaml.local
 service-account-*.json
 *-credentials.json
+oauth-*.json
+*-token.json
 /data/
 data/devops.db
 data/*.db
