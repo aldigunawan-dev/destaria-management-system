@@ -22,10 +22,17 @@ class BackupManager:
     
     Supports:
     - Full backups via Pterodactyl API
+    - Incremental backups with maintenance mode (server stop with warnings)
     - Incremental backup tracking
     - Google Drive uploads
     - Database metadata tracking
     - Progress monitoring
+    
+    Methods:
+    - full_backup(): Full backup while server running
+    - incremental_backup(): Incremental backup (full backup with shorter retention)
+    - incremental_backup_with_maintenance(): Backup with server maintenance mode
+    - restore_backup(): Restore from backup
     
     Attributes:
         pterodactyl_client: Pterodactyl API client
@@ -240,6 +247,239 @@ class BackupManager:
         # Pterodactyl doesn't support incremental backups natively
         # So we'll do a full backup and mark it as incremental in metadata
         return self.full_backup(server_id, server_name, retention_days=7)
+    
+    def incremental_backup_with_maintenance(self, server_id: str, server_name: str,
+                                           retention_days: int = 7) -> Optional[str]:
+        """
+        Incremental backup dengan server maintenance mode.
+        
+        Strategy:
+        1. Send warning message 5 menit sebelum server stop
+        2. Countdown messages setiap menit
+        3. Stop server gracefully
+        4. Perform full backup (safe ketika server stopped)
+        5. Start server kembali
+        6. Send online message
+        
+        Ideal untuk backup tengah malam saat players offline.
+        
+        Args:
+            server_id: Pterodactyl server ID
+            server_name: Server name
+            retention_days: Retention period (default 7 hari untuk incremental)
+        
+        Returns:
+            Backup ID if successful, None otherwise
+        """
+        lock = self._get_lock(server_id)
+        
+        if not lock.acquire(blocking=False):
+            self.logger.warning(f"Backup already in progress for server {server_id}")
+            return None
+        
+        backup_id = f"backup_{server_id}_{uuid.uuid4().hex[:8]}"
+        job_id = f"job_{uuid.uuid4().hex}"
+        
+        try:
+            # Create database record
+            if not self.database.add_backup(backup_id, server_id, server_name,
+                                            "incremental", retention_days):
+                self.logger.error(f"Failed to create backup record: {backup_id}")
+                return None
+            
+            # Create job tracking
+            if not self.database.create_backup_job(job_id, backup_id, server_id):
+                self.logger.error(f"Failed to create backup job: {job_id}")
+                return None
+            
+            self.logger.info(f"Starting incremental backup with maintenance: {backup_id}")
+            
+            start_time = time.time()
+            
+            # PHASE 1: Warning countdown (5 minutes)
+            self.logger.info(f"Sending shutdown warnings to {server_name}")
+            self._update_progress(job_id, 5, "Sending server warnings")
+            
+            # Send initial warning: 5 menit
+            self.pterodactyl_client.send_command(
+                server_id,
+                "say [System] Server akan di-restart dalam 5 menit untuk backup"
+            )
+            time.sleep(60)
+            
+            # Send warning: 4 menit
+            self.pterodactyl_client.send_command(
+                server_id,
+                "say [System] Server akan di-restart dalam 4 menit"
+            )
+            time.sleep(60)
+            
+            # Send warning: 3 menit
+            self.pterodactyl_client.send_command(
+                server_id,
+                "say [System] Server akan di-restart dalam 3 menit"
+            )
+            time.sleep(60)
+            
+            # Send warning: 2 menit
+            self.pterodactyl_client.send_command(
+                server_id,
+                "say [System] Server akan di-restart dalam 2 menit"
+            )
+            time.sleep(60)
+            
+            # Send warning: 1 menit
+            self.pterodactyl_client.send_command(
+                server_id,
+                "say [System] Server akan di-restart dalam 1 menit"
+            )
+            time.sleep(30)
+            
+            # Final warning: 30 detik
+            self.pterodactyl_client.send_command(
+                server_id,
+                "say [System] Server restart sekarang!"
+            )
+            time.sleep(30)
+            
+            # PHASE 2: Stop server gracefully
+            self.logger.info(f"Stopping server {server_name}")
+            self._update_progress(job_id, 15, "Stopping server")
+            
+            if not self.pterodactyl_client.stop_server(server_id):
+                raise Exception(f"Failed to stop server {server_id}")
+            
+            # Wait untuk server fully shutdown
+            time.sleep(5)
+            self.logger.info(f"Server {server_name} stopped successfully")
+            self._update_progress(job_id, 20, "Server stopped, starting backup")
+            
+            # PHASE 3: Perform backup (server is now stopped - SAFE!)
+            self.logger.info(f"Starting backup for {server_name} (server offline)")
+            self._update_progress(job_id, 25, "Triggering backup")
+            
+            backup_info = self.pterodactyl_client.create_backup(server_id)
+            
+            if not backup_info:
+                raise Exception("Failed to trigger backup on Pterodactyl")
+            
+            pterodactyl_backup_id = backup_info.get("uuid")
+            self.logger.info(f"Pterodactyl backup created: {pterodactyl_backup_id}")
+            self._update_progress(job_id, 30, "Waiting for backup completion")
+            
+            # Poll untuk completion
+            timeout = self._calculate_timeout(estimated_size_gb=40)
+            max_iterations = timeout // 30
+            backup_completed = False
+            
+            for iteration in range(max_iterations):
+                time.sleep(30)
+                
+                backup_status = self.pterodactyl_client.get_backup(
+                    server_id, pterodactyl_backup_id
+                )
+                
+                if not backup_status:
+                    raise Exception("Backup status unavailable")
+                
+                progress_percent = 30 + (iteration / max_iterations) * 50  # 30% to 80%
+                self._update_progress(job_id, int(progress_percent),
+                                    f"Backup in progress ({iteration * 30}s)")
+                
+                if backup_status.get("is_successful"):
+                    backup_completed = True
+                    break
+                elif backup_status.get("is_failed"):
+                    raise Exception(f"Backup failed on Pterodactyl")
+            
+            if not backup_completed:
+                raise Exception(f"Backup timeout after {timeout} seconds")
+            
+            # Get backup info
+            backup_size = backup_info.get("bytes", 0)
+            self.logger.info(f"Backup completed. Size: {backup_size / (1024**3):.2f} GB")
+            
+            # PHASE 4: Upload to Google Drive (optional)
+            gdrive_file_id = None
+            gdrive_url = None
+            
+            if self.gdrive_client:
+                self._update_progress(job_id, 85, "Uploading to Google Drive")
+                
+                gdrive_file_id, gdrive_url = self.gdrive_client.upload_backup(
+                    server_name, backup_id, backup_info
+                )
+                
+                if gdrive_file_id:
+                    self.logger.info(f"Backup uploaded to Google Drive: {gdrive_file_id}")
+                else:
+                    self.logger.warning(f"Failed to upload backup to Google Drive")
+            
+            # PHASE 5: Start server kembali
+            self.logger.info(f"Starting server {server_name}")
+            self._update_progress(job_id, 90, "Starting server")
+            
+            if not self.pterodactyl_client.start_server(server_id):
+                self.logger.error(f"Failed to start server {server_id}")
+                # Retry once more
+                time.sleep(5)
+                if not self.pterodactyl_client.start_server(server_id):
+                    raise Exception(f"Failed to start server {server_id}")
+            
+            # Wait untuk server fully online
+            time.sleep(5)
+            self.logger.info(f"Server {server_name} started successfully")
+            
+            # Send online message
+            self.pterodactyl_client.send_command(
+                server_id,
+                "say [System] Server backup selesai. Selamat bermain!"
+            )
+            
+            # PHASE 6: Update database with completion
+            duration = int(time.time() - start_time)
+            
+            if not self.database.update_backup_status(
+                backup_id,
+                status="completed",
+                size_bytes=backup_size,
+                gdrive_file_id=gdrive_file_id,
+                gdrive_file_url=gdrive_url
+            ):
+                self.logger.error("Failed to update backup status to completed")
+                return None
+            
+            self._update_progress(job_id, 100, "Backup completed successfully")
+            self.logger.info(f"Incremental backup with maintenance completed: {backup_id} ({duration}s)")
+            
+            return backup_id
+        
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.error(f"Incremental backup with maintenance failed: {error_msg}")
+            
+            # Update database with error
+            self.database.update_backup_status(backup_id, status="failed",
+                                              error_message=error_msg)
+            self.database.update_backup_job(job_id, status="failed",
+                                           error_message=error_msg)
+            
+            # EMERGENCY: Ensure server is started
+            try:
+                self.logger.error("EMERGENCY: Attempting to restart server after failure")
+                self.pterodactyl_client.start_server(server_id)
+                time.sleep(5)
+                self.pterodactyl_client.send_command(
+                    server_id,
+                    "say [System] Emergency restart completed. Backup failed."
+                )
+            except Exception as restart_error:
+                self.logger.critical(f"CRITICAL: Failed to restart server after backup failure: {restart_error}")
+            
+            return None
+        
+        finally:
+            lock.release()
     
     def restore_backup(self, server_id: str, backup_id: str) -> bool:
         """
