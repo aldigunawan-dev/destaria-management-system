@@ -7,9 +7,9 @@ Tests uploading a backup file to Google Drive
 import os
 import sys
 import logging
+import argparse
 import time
 from pathlib import Path
-import io
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -22,8 +22,13 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-def test_gdrive_upload():
-    """Test Google Drive upload with Service Account or OAuth"""
+def test_gdrive_upload(keep_backup=False):
+    """Test Google Drive upload with Service Account or OAuth
+    
+    Args:
+        keep_backup: If True, keep uploaded backup in Google Drive (for inspection)
+                    If False, delete backup after test (default)
+    """
     
     print("=" * 60)
     print("GOOGLE DRIVE UPLOAD TEST")
@@ -129,16 +134,21 @@ def test_gdrive_upload():
             
             print()
             
-            # Clean up test file
-            print("[INFO] Cleaning up...")
+            # Clean up local test file
+            print("[INFO] Cleaning up local files...")
             test_file_path.unlink()
             
-            # Delete from Google Drive
-            print("[INFO] Deleting test file from Google Drive...")
-            if gdrive.delete_backup(gdrive_file_id):
-                print("[OK] Test file deleted from Google Drive")
+            # Delete from Google Drive (unless --keep is specified)
+            if keep_backup:
+                print("[INFO] Keeping backup in Google Drive (--keep flag set)")
+                print(f"  File ID: {gdrive_file_id}")
+                print(f"  URL: {gdrive_url}")
             else:
-                print("[WARNING] Failed to delete test file from Google Drive")
+                print("[INFO] Deleting test file from Google Drive...")
+                if gdrive.delete_backup(gdrive_file_id):
+                    print("[OK] Test file deleted from Google Drive")
+                else:
+                    print("[WARNING] Failed to delete test file from Google Drive")
             
             return True
         else:
@@ -153,7 +163,18 @@ def test_gdrive_upload():
 
 
 if __name__ == "__main__":
-    success = test_gdrive_upload()
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Test Google Drive backup upload functionality"
+    )
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="Keep uploaded backup in Google Drive for inspection (default: delete after test)"
+    )
+    args = parser.parse_args()
+    
+    success = test_gdrive_upload(keep_backup=args.keep)
     print()
     print("=" * 60)
     if success:

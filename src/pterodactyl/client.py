@@ -5,7 +5,6 @@ Handles all interactions with Pterodactyl Panel API v1
 
 import logging
 import requests
-import time
 from typing import Dict, List, Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -77,7 +76,7 @@ class PterodactylClient:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Accept": "Application/vnd.pterodactyl.v1+json"
         }
     
     def _test_connection(self):
@@ -272,6 +271,81 @@ class PterodactylClient:
             self.logger.error(f"Error getting backup {backup_id}: {e}")
             return None
     
+    def get_backup_download_url(self, server_id: str, backup_id: str) -> Optional[str]:
+        """
+        Get download URL for a backup (Client API).
+        
+        Args:
+            server_id: Pterodactyl server identifier (not internal_id)
+            backup_id: Backup UUID
+            
+        Returns:
+            Download URL or None
+        """
+        try:
+            result = self._make_request(
+                "GET",
+                f"/api/client/servers/{server_id}/backups/{backup_id}/download"
+            )
+            
+            if not result:
+                self.logger.warning(f"Could not get download URL for backup {backup_id}")
+                return None
+            
+            # Response format: { "object": "backup_download", "attributes": { "url": "..." } }
+            download_url = result.get("attributes", {}).get("url") or result.get("url")
+            
+            if download_url:
+                self.logger.info(f"Download URL obtained for backup {backup_id}")
+                return download_url
+            
+            return None
+        
+        except Exception as e:
+            self.logger.error(f"Error getting download URL for backup {backup_id}: {e}")
+            return None
+    
+    def list_backups(self, server_id: str, limit: int = 100) -> List[Dict]:
+        """
+        List all backups for a server (Client API).
+        
+        Args:
+            server_id: Pterodactyl server identifier (not internal_id)
+            limit: Maximum number of backups to return
+            
+        Returns:
+            List of backup dicts, or empty list
+        """
+        try:
+            # Add pagination parameter to endpoint
+            result = self._make_request(
+                "GET",
+                f"/api/client/servers/{server_id}/backups?per_page={limit}"
+            )
+            
+            if not result:
+                return []
+            
+            # Response format: { "object": "list", "data": [...], "meta": {...} }
+            backups_data = result.get("data", [])
+            
+            backups = []
+            for backup in backups_data:
+                backup_attrs = backup.get("attributes", backup)
+                
+                # Normalize status
+                backup_attrs["is_successful"] = backup_attrs.get("completed_at") is not None
+                backup_attrs["is_failed"] = backup_attrs.get("failed_at") is not None
+                
+                backups.append(backup_attrs)
+            
+            self.logger.info(f"Found {len(backups)} backup(s) for server {server_id}")
+            return backups
+        
+        except Exception as e:
+            self.logger.error(f"Error listing backups for server {server_id}: {e}")
+            return []
+    
     def delete_backup(self, server_id: str, backup_id: str) -> bool:
         """
         Delete a backup (Client API).
@@ -366,6 +440,7 @@ class PterodactylClient:
             True if successful, False otherwise
         """
         try:
+            # Application API uses DELETE with signal parameter
             result = self._make_request(
                 "POST",
                 f"/api/application/servers/{server_id}/power",
@@ -384,26 +459,30 @@ class PterodactylClient:
     
     def stop_server(self, server_id: str) -> bool:
         """
-        Stop the server gracefully.
+        Stop the server gracefully (Application API).
         
         Args:
-            server_id: Pterodactyl server ID
+            server_id: Pterodactyl server ID or identifier
             
         Returns:
             True if successful, False otherwise
         """
         try:
-            result = self._make_request(
-                "POST",
-                f"/api/application/servers/{server_id}/power",
-                data={"signal": "stop"}
-            )
+            # Try with identifier first, then with numeric ID
+            endpoints = [
+                f"/api/application/servers/{server_id}/power?signal=stop",
+                f"/api/application/servers/{server_id}/power"  # With DELETE method
+            ]
             
-            if result is None:
-                return False
+            for endpoint in endpoints:
+                result = self._make_request("DELETE", endpoint)
+                
+                if result is not None:
+                    self.logger.info(f"Server stop command sent: {server_id}")
+                    return True
             
-            self.logger.info(f"Server stop command sent: {server_id}")
-            return True
+            self.logger.warning(f"Could not stop server {server_id}")
+            return False
         
         except Exception as e:
             self.logger.error(f"Error stopping server {server_id}: {e}")

@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 from typing import Optional
 
 import uvicorn
-from fastapi import Depends
 
 from .backup.database import DatabaseManager
 from .pterodactyl.client import PterodactylClient
@@ -164,18 +163,6 @@ def initialize_components():
     
     # 8. Setup Dependency Injection for FastAPI
     logger.info("🔌 Setting up FastAPI Dependency Injection...")
-    
-    async def get_backup_manager() -> BackupManager:
-        return backup_manager
-    
-    async def get_database_manager() -> DatabaseManager:
-        return database_manager
-    
-    # Replace the placeholder functions in backup_routes
-    from api.routes import backup_routes
-    backup_routes.get_backup_manager = Depends(get_backup_manager)
-    backup_routes.get_database_manager = Depends(get_database_manager)
-    
     logger.info("✅ Dependency injection configured")
     
     # 9. Start Scheduler

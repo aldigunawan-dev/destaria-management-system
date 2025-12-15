@@ -5,20 +5,17 @@ Handles backup uploads to Google Drive using Service Account or OAuth
 
 import logging
 import os
-import json
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Callable
 from datetime import datetime
-import io
 import time
 
-from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
 from google.oauth2.credentials import Credentials as OAuthCredentials
 from google.auth.exceptions import GoogleAuthError
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseUpload, MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaIoBaseUpload
 
 logger = logging.getLogger(__name__)
 
@@ -498,3 +495,63 @@ class GoogleDriveClient:
         """Close client and cleanup resources."""
         # HTTP connection will be cleaned up automatically
         self.logger.info("Google Drive client closed")
+    
+    def upload_metadata_file(self, server_name: str, backup_id: str, 
+                           metadata: Dict) -> Optional[str]:
+        """
+        Upload backup metadata as JSON file to Google Drive.
+        
+        Args:
+            server_name: Server name
+            backup_id: Backup ID
+            metadata: Dictionary of backup metadata
+            
+        Returns:
+            File ID of uploaded metadata file, or None on failure
+        """
+        try:
+            import json
+            from io import BytesIO
+            
+            # Create folder structure: server_name / date
+            date_folder = datetime.now().strftime("%Y-%m-%d")
+            
+            server_folder = self._ensure_subfolder(self.folder_id, server_name)
+            if not server_folder:
+                raise RuntimeError(f"Failed to create server folder: {server_name}")
+            
+            date_subfolder = self._ensure_subfolder(server_folder, date_folder)
+            if not date_subfolder:
+                raise RuntimeError(f"Failed to create date folder: {date_folder}")
+            
+            # Create metadata file
+            filename = f"{backup_id}_metadata.json"
+            metadata_json = json.dumps(metadata, indent=2)
+            
+            file_metadata = {
+                'name': filename,
+                'parents': [date_subfolder],
+                'description': f"Backup metadata - {backup_id}"
+            }
+            
+            # Upload as text/plain so it's readable in Drive
+            media = MediaIoBaseUpload(
+                BytesIO(metadata_json.encode('utf-8')),
+                mimetype='application/json',
+                resumable=False
+            )
+            
+            file_obj = self.drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id, webViewLink',
+                supportsAllDrives=True
+            ).execute()
+            
+            file_id = file_obj.get('id')
+            self.logger.info(f"Metadata uploaded: {file_id}")
+            return file_id
+        
+        except Exception as e:
+            self.logger.error(f"Failed to upload metadata: {e}")
+            return None

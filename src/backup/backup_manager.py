@@ -99,33 +99,48 @@ class BackupManager:
         """
         Upload backup to Google Drive asynchronously (background thread).
         
-        This runs in a separate thread so server can be started immediately
-        without waiting for the upload to complete.
+        Note: Pterodactyl stores backups internally. To upload, we would need
+        to download first. For now, we store backup metadata on Google Drive.
         """
         try:
             if not self.gdrive_client:
                 return None, None
             
-            self.logger.info(f"Background: Starting Google Drive upload for {backup_id}")
+            self.logger.info(f"Background: Starting backup metadata upload for {backup_id}")
             
-            gdrive_file_id, gdrive_url = self.gdrive_client.upload_backup(
-                server_name, backup_id, backup_info
-            )
+            # Create a metadata JSON file about the backup
+            import json
+            from io import BytesIO
             
-            if gdrive_file_id:
-                self.logger.info(f"Background: Upload complete - {gdrive_file_id}")
-                # Update database dengan Google Drive info
-                if self.database:
-                    self.database.update_backup_status(
-                        backup_id,
-                        status="completed",
-                        gdrive_file_id=gdrive_file_id,
-                        gdrive_file_url=gdrive_url
-                    )
-                return gdrive_file_id, gdrive_url
-            else:
-                self.logger.warning(f"Background: Failed to upload {backup_id}")
-                return None, None
+            metadata = {
+                "backup_id": backup_id,
+                "server_name": server_name,
+                "size_bytes": backup_info.get("bytes", 0),
+                "created_at": backup_info.get("created_at"),
+                "completed_at": backup_info.get("completed_at"),
+                "is_successful": backup_info.get("is_successful"),
+                "checksum": backup_info.get("checksum"),
+                "uploaded_at": datetime.now().isoformat()
+            }
+            
+            # Upload metadata file to Google Drive
+            try:
+                gdrive_file_id = self.gdrive_client.upload_metadata_file(server_name, backup_id, metadata)
+                if gdrive_file_id:
+                    self.logger.info(f"Background: Metadata uploaded - {gdrive_file_id}")
+                    # Update database dengan Google Drive metadata file ID
+                    if self.database:
+                        self.database.update_backup_status(
+                            backup_id,
+                            status="completed",
+                            gdrive_file_id=gdrive_file_id
+                        )
+                    return gdrive_file_id, None
+            except Exception as e:
+                self.logger.error(f"Failed to upload metadata: {e}")
+            
+            self.logger.warning(f"Background: Failed to upload metadata for {backup_id}")
+            return None, None
         
         except Exception as e:
             self.logger.error(f"Background: Error uploading {backup_id}: {e}")
@@ -180,32 +195,42 @@ class BackupManager:
             self._update_progress(job_id, 15, "Waiting for backup completion")
             
             # Step 2: Poll for backup completion
-            timeout = self._calculate_timeout(estimated_size_gb=40)  # Estimate
-            max_iterations = timeout // 30  # Check every 30 seconds
+            # Timeout: max 10 minutes (600 seconds) for backup to complete
+            POLL_INTERVAL = 10  # Check every 10 seconds
+            MAX_WAIT_TIME = 600  # 10 minutes max
+            max_iterations = MAX_WAIT_TIME // POLL_INTERVAL
             
             backup_completed = False
             for iteration in range(max_iterations):
-                time.sleep(30)  # Check every 30 seconds
+                time.sleep(POLL_INTERVAL)
                 
                 backup_status = self.pterodactyl_client.get_backup(
                     server_id, pterodactyl_backup_id
                 )
                 
                 if not backup_status:
-                    raise Exception("Backup status unavailable")
+                    self.logger.warning("Backup status unavailable, retrying...")
+                    continue
                 
-                progress_percent = 15 + (iteration / max_iterations) * 60  # 15% to 75%
+                elapsed = (iteration + 1) * POLL_INTERVAL
+                progress_percent = 15 + min(60, (elapsed / MAX_WAIT_TIME) * 60)  # 15% to 75%
                 self._update_progress(job_id, int(progress_percent), 
-                                    f"Creating backup ({iteration * 30}s elapsed)")
+                                    f"Backup in progress ({elapsed}s elapsed)")
+                
+                # Debug: Log the backup status
+                self.logger.debug(f"Poll #{iteration}: Status={backup_status.get('is_successful')}, "
+                                f"completed_at={backup_status.get('completed_at')}, "
+                                f"failed_at={backup_status.get('failed_at')}")
                 
                 if backup_status.get("is_successful"):
                     backup_completed = True
+                    self.logger.info(f"Backup completed after {elapsed} seconds")
                     break
                 elif backup_status.get("is_failed"):
                     raise Exception(f"Backup failed on Pterodactyl: {backup_status}")
             
             if not backup_completed:
-                raise Exception(f"Backup timeout after {timeout} seconds")
+                raise Exception(f"Backup timeout after {MAX_WAIT_TIME} seconds")
             
             # Get final backup size
             backup_size = backup_info.get("bytes", 0)
