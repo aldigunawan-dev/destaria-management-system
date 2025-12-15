@@ -58,11 +58,12 @@ class PterodactylClient:
         session = requests.Session()
         
         # Retry strategy for transient failures
+        # Note: method_whitelist deprecated in urllib3 2.0+, use allowed_methods instead
         retry_strategy = Retry(
             total=self.MAX_RETRIES,
             backoff_factor=self.RETRY_BACKOFF,
             status_forcelist=[429, 500, 502, 503, 504],
-            method_whitelist=["HEAD", "GET", "OPTIONS", "POST", "PUT"]
+            allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT"]  # urllib3 2.0+ compatible
         )
         
         adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -140,22 +141,37 @@ class PterodactylClient:
     
     def get_servers(self) -> List[Dict]:
         """
-        Get list of all servers.
+        Get list of all servers for current user (Client API).
         
         Returns:
-            List of server dictionaries with basic info
+            List of server dictionaries with identifier, name, and attributes
         """
         try:
-            result = self._make_request("GET", "/api/application/servers")
+            result = self._make_request("GET", "/api/client")
             
             if not result:
                 return []
             
-            # API returns paginated results
+            # API returns paginated results with nested structure
             servers = result.get("data", [])
-            self.logger.info(f"Retrieved {len(servers)} servers")
+            self.logger.info(f"Retrieved {len(servers)} servers from Client API")
             
-            return servers
+            # Extract relevant fields from nested attributes
+            processed_servers = []
+            for server in servers:
+                if server.get("object") == "server":
+                    attrs = server.get("attributes", {})
+                    processed_servers.append({
+                        "identifier": attrs.get("identifier"),
+                        "name": attrs.get("name"),
+                        "uuid": attrs.get("uuid"),
+                        "internal_id": attrs.get("internal_id"),
+                        "node": attrs.get("node"),
+                        "attributes": attrs  # Keep full attributes
+                    })
+            
+            self.logger.debug(f"Processed {len(processed_servers)} servers")
+            return processed_servers
         
         except Exception as e:
             self.logger.error(f"Error getting servers: {e}")
@@ -163,16 +179,16 @@ class PterodactylClient:
     
     def get_server(self, server_id: str) -> Optional[Dict]:
         """
-        Get detailed server information.
+        Get detailed server information (Client API).
         
         Args:
-            server_id: Pterodactyl server ID
+            server_id: Pterodactyl server identifier (not internal_id)
             
         Returns:
             Server dictionary with full details or None
         """
         try:
-            result = self._make_request("GET", f"/api/application/servers/{server_id}")
+            result = self._make_request("GET", f"/api/client/servers/{server_id}")
             
             if not result:
                 self.logger.warning(f"Server not found: {server_id}")
@@ -198,10 +214,10 @@ class PterodactylClient:
             Backup info dict with uuid and details, or None on failure
         """
         try:
-            # Trigger backup creation
+            # Trigger backup creation using Client API (not Application API)
             result = self._make_request(
                 "POST",
-                f"/api/application/servers/{server_id}/backups",
+                f"/api/client/servers/{server_id}/backups",
                 timeout=10
             )
             
@@ -222,10 +238,10 @@ class PterodactylClient:
     
     def get_backup(self, server_id: str, backup_id: str) -> Optional[Dict]:
         """
-        Get backup status and details.
+        Get backup status and details (Client API).
         
         Args:
-            server_id: Pterodactyl server ID
+            server_id: Pterodactyl server identifier (not internal_id)
             backup_id: Backup UUID
             
         Returns:
@@ -234,7 +250,7 @@ class PterodactylClient:
         try:
             result = self._make_request(
                 "GET",
-                f"/api/application/servers/{server_id}/backups/{backup_id}"
+                f"/api/client/servers/{server_id}/backups/{backup_id}"
             )
             
             if not result:
@@ -258,10 +274,10 @@ class PterodactylClient:
     
     def delete_backup(self, server_id: str, backup_id: str) -> bool:
         """
-        Delete a backup.
+        Delete a backup (Client API).
         
         Args:
-            server_id: Pterodactyl server ID
+            server_id: Pterodactyl server identifier (not internal_id)
             backup_id: Backup UUID
             
         Returns:
@@ -270,7 +286,7 @@ class PterodactylClient:
         try:
             result = self._make_request(
                 "DELETE",
-                f"/api/application/servers/{server_id}/backups/{backup_id}"
+                f"/api/client/servers/{server_id}/backups/{backup_id}"
             )
             
             if result is None:

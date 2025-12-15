@@ -2,23 +2,23 @@
 # Define your Minecraft servers here
 
 servers:
-  production:
-    id: "prod_server_id"
-    name: "Production Server"
-    description: "Main survival server"
-    backup_enabled: true
-    backup_schedule: "0 2 * * *"  # Daily at 2 AM
-    backup_type: "full"  # or "incremental"
+  # production:
+  #   id: "prod_server_id"
+  #   name: "Production Server"
+  #   description: "Main survival server"
+  #   backup_enabled: true
+  #   backup_schedule: "0 2 * * *"  # Daily at 2 AM
+  #   backup_type: "full"  # or "incremental"
     
   test:
-    id: "test_server_id"
-    name: "Test Server"
-    description: "Testing server for plugin updates"
+    id: "fe08f84f"
+    name: "test management system"
+    description: "Minecraft Paper Server"
     backup_enabled: true
-    backup_schedule: "0 3 * * *"  # Daily at 3 AM
+    backup_schedule: "0 2 * * 1-6"  # Mon-Sat at 2 AM (maintenance mode)
     backup_type: "full"
 
 # Pterodactyl Configuration
 pterodactyl:
-  panel_url: "https://panel.example.com"
+  panel_url: "https://panel.destaria.com"
   api_key: "${PTERODACTYL_API_KEY}"  # Set via environment variable
