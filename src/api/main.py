@@ -7,6 +7,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 
+from .routes import backup_routes
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -24,6 +26,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include routers
+app.include_router(backup_routes.router)
+
 
 @app.get("/")
 async def root():
@@ -31,7 +36,13 @@ async def root():
     return {
         "message": "Minecraft DevOps Platform API",
         "version": "0.1.0",
-        "status": "running"
+        "status": "running",
+        "endpoints": {
+            "backup": "/api/backup",
+            "health": "/health",
+            "docs": "/docs",
+            "openapi": "/openapi.json"
+        }
     }
 
 
@@ -40,7 +51,3 @@ async def health():
     """Health check endpoint."""
     return {"status": "healthy"}
 
-
-# TODO: Import and include routers
-# from .routes import backup_routes, update_routes, etc.
-# app.include_router(backup_routes.router, prefix="/api/backup", tags=["backup"])
