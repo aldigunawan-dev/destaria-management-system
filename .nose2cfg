@@ -1,0 +1,10 @@
+[unittest]
+always-on = True
+
+[coverage]
+always-on = True
+directory = htmlcov
+branch = True
+
+[log]
+level = INFO
