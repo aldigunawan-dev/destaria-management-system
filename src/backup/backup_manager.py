@@ -8,7 +8,7 @@ import uuid
 import time
 import os
 from datetime import datetime
-from threading import Lock
+from threading import Lock, Thread
 from typing import Optional, Dict, Callable
 
 from .database import DatabaseManager
@@ -95,6 +95,42 @@ class BackupManager:
         
         self.logger.debug(f"Job {job_id}: {step} ({progress}%)")
     
+    def _upload_to_gdrive_async(self, backup_id: str, server_name: str, backup_info: Dict):
+        """
+        Upload backup to Google Drive asynchronously (background thread).
+        
+        This runs in a separate thread so server can be started immediately
+        without waiting for the upload to complete.
+        """
+        try:
+            if not self.gdrive_client:
+                return None, None
+            
+            self.logger.info(f"Background: Starting Google Drive upload for {backup_id}")
+            
+            gdrive_file_id, gdrive_url = self.gdrive_client.upload_backup(
+                server_name, backup_id, backup_info
+            )
+            
+            if gdrive_file_id:
+                self.logger.info(f"Background: Upload complete - {gdrive_file_id}")
+                # Update database dengan Google Drive info
+                if self.database:
+                    self.database.update_backup_status(
+                        backup_id,
+                        status="completed",
+                        gdrive_file_id=gdrive_file_id,
+                        gdrive_file_url=gdrive_url
+                    )
+                return gdrive_file_id, gdrive_url
+            else:
+                self.logger.warning(f"Background: Failed to upload {backup_id}")
+                return None, None
+        
+        except Exception as e:
+            self.logger.error(f"Background: Error uploading {backup_id}: {e}")
+            return None, None
+    
     def full_backup(self, server_id: str, server_name: str, 
                    retention_days: int = 30) -> Optional[str]:
         """
@@ -175,40 +211,32 @@ class BackupManager:
             backup_size = backup_info.get("bytes", 0)
             self.logger.info(f"Backup completed. Size: {backup_size / (1024**3):.2f} GB")
             
-            # Step 3: Upload to Google Drive
-            if self.gdrive_client:
-                self._update_progress(job_id, 80, "Uploading to Google Drive")
-                
-                # Download backup from Pterodactyl (implementation depends on API)
-                # For now, we'll assume backup is available locally or via streaming
-                gdrive_file_id, gdrive_url = self.gdrive_client.upload_backup(
-                    server_name, backup_id, backup_info
-                )
-                
-                if gdrive_file_id:
-                    self.logger.info(f"Backup uploaded to Google Drive: {gdrive_file_id}")
-                else:
-                    self.logger.warning(f"Failed to upload backup to Google Drive")
-                    gdrive_file_id = None
-                    gdrive_url = None
-            else:
-                gdrive_file_id = None
-                gdrive_url = None
-            
-            # Step 4: Update database with completion info
-            duration = int(time.time() - start_time)
-            
-            if not self.database.update_backup_status(
+            # Step 3: Update database with initial completion (no gdrive info yet)
+            self.database.update_backup_status(
                 backup_id,
                 status="completed",
-                size_bytes=backup_size,
-                gdrive_file_id=gdrive_file_id,
-                gdrive_file_url=gdrive_url
-            ):
-                self.logger.error("Failed to update backup status to completed")
-                return None
+                size_bytes=backup_size
+            )
             
-            self._update_progress(job_id, 100, "Backup completed successfully")
+            # Step 4: Upload to Google Drive (BACKGROUND THREAD)
+            # Non-blocking, database already updated
+            if self.gdrive_client:
+                self.logger.info(f"Starting background Google Drive upload for {backup_id}")
+                self._update_progress(job_id, 85, "Google Drive upload in background")
+                
+                # Start upload in background thread
+                upload_thread = Thread(
+                    target=self._upload_to_gdrive_async,
+                    args=(backup_id, server_name, backup_info),
+                    daemon=True
+                )
+                upload_thread.start()
+                self.logger.info(f"Background upload thread started for {backup_id}")
+            
+            # Step 5: Update final status
+            duration = int(time.time() - start_time)
+            
+            self._update_progress(job_id, 100, "Backup completed (Google Drive upload in background)")
             self.logger.info(f"Full backup completed successfully: {backup_id} ({duration}s)")
             
             return backup_id
@@ -399,25 +427,9 @@ class BackupManager:
             backup_size = backup_info.get("bytes", 0)
             self.logger.info(f"Backup completed. Size: {backup_size / (1024**3):.2f} GB")
             
-            # PHASE 4: Upload to Google Drive (optional)
-            gdrive_file_id = None
-            gdrive_url = None
-            
-            if self.gdrive_client:
-                self._update_progress(job_id, 85, "Uploading to Google Drive")
-                
-                gdrive_file_id, gdrive_url = self.gdrive_client.upload_backup(
-                    server_name, backup_id, backup_info
-                )
-                
-                if gdrive_file_id:
-                    self.logger.info(f"Backup uploaded to Google Drive: {gdrive_file_id}")
-                else:
-                    self.logger.warning(f"Failed to upload backup to Google Drive")
-            
-            # PHASE 5: Start server kembali
-            self.logger.info(f"Starting server {server_name}")
-            self._update_progress(job_id, 90, "Starting server")
+            # PHASE 4: Start server IMMEDIATELY (don't wait for Google Drive)
+            self.logger.info(f"Starting server {server_name} immediately after backup")
+            self._update_progress(job_id, 85, "Starting server (Google Drive upload in background)")
             
             if not self.pterodactyl_client.start_server(server_id):
                 self.logger.error(f"Failed to start server {server_id}")
@@ -436,9 +448,28 @@ class BackupManager:
                 "say [System] Server backup selesai. Selamat bermain!"
             )
             
-            # PHASE 6: Update database with completion
+            # PHASE 5: Upload to Google Drive (BACKGROUND THREAD)
+            # This happens after server is online, so players can join immediately
+            gdrive_file_id = None
+            gdrive_url = None
+            
+            if self.gdrive_client:
+                self.logger.info(f"Starting background Google Drive upload for {backup_id}")
+                self._update_progress(job_id, 90, "Server online, Google Drive upload in background")
+                
+                # Start upload in background thread
+                upload_thread = Thread(
+                    target=self._upload_to_gdrive_async,
+                    args=(backup_id, server_name, backup_info),
+                    daemon=True
+                )
+                upload_thread.start()
+                self.logger.info(f"Background upload thread started for {backup_id}")
+            
+            # PHASE 6: Update database with backup completion
             duration = int(time.time() - start_time)
             
+            # Update status (might be updated again by background thread with gdrive info)
             if not self.database.update_backup_status(
                 backup_id,
                 status="completed",
@@ -449,7 +480,7 @@ class BackupManager:
                 self.logger.error("Failed to update backup status to completed")
                 return None
             
-            self._update_progress(job_id, 100, "Backup completed successfully")
+            self._update_progress(job_id, 100, "Backup completed, server online")
             self.logger.info(f"Incremental backup with maintenance completed: {backup_id} ({duration}s)")
             
             return backup_id
