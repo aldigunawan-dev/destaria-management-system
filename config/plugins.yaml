@@ -1,0 +1,28 @@
+# Plugin Configuration
+# Define plugins to monitor and update
+
+plugins:
+  - name: "EssentialsX"
+    source: "spigot"
+    enabled: true
+    auto_update: false
+    current_version: "2.19.8"
+    
+  - name: "WorldEdit"
+    source: "spigot"
+    enabled: true
+    auto_update: false
+    current_version: "7.2.14"
+    
+  - name: "LiteBans"
+    source: "github"
+    github_repo: "LiteBans/LiteBans"
+    enabled: true
+    auto_update: false
+
+# Update Settings
+updates:
+  test_deployment: true  # Deploy updates to test server first
+  backup_before_update: true  # Create backup before updating
+  notify_on_update: true  # Send Discord notifications
+  auto_restart: false  # Restart server after update

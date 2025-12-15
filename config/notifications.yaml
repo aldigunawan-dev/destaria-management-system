@@ -1,0 +1,29 @@
+# Notification Configuration
+
+notifications:
+  discord:
+    enabled: true
+    webhook_url: "${DISCORD_WEBHOOK_URL}"  # Set via environment variable
+    events:
+      - backup_started
+      - backup_completed
+      - backup_failed
+      - update_available
+      - update_deployed
+      - test_results
+      - errors
+      - warnings
+
+  email:
+    enabled: false
+    # Email configuration would go here
+    smtp_server: "smtp.example.com"
+    from_address: "devops@example.com"
+    recipients:
+      - "admin@example.com"
+
+# Notification Levels
+levels:
+  error: "always"
+  warning: "daily"
+  info: "on_request"

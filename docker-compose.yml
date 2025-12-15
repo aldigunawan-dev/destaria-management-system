@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  devops-api:
+    build: .
+    container_name: minecraft-devops-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PTERODACTYL_API_KEY=${PTERODACTYL_API_KEY}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./backups:/app/backups  # Store backup metadata/files
+    networks:
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # Optional: Database for tracking backups and updates
+  postgres:
+    image: postgres:16-alpine
+    container_name: minecraft-devops-db
+    environment:
+      POSTGRES_DB: devops_db
+      POSTGRES_USER: devops_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - devops-network
+    restart: unless-stopped
+    # Uncomment to use database
+    # profiles:
+    #   - with-db
+
+networks:
+  devops-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    # Uncomment to use database
+    # driver: local
