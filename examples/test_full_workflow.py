@@ -84,6 +84,18 @@ def test_full_workflow(server_identifier="fe08f84f",
         print(f"[OK] Server: {server_name}")
         print()
         
+        # Step 3: Stop server
+        print("[STEP 3] Stopping server...")
+        stop_success = pterodactyl.stop_server(server_identifier)
+        if not stop_success:
+            print("[WARNING] Could not stop server, continuing anyway...")
+        else:
+            print("[OK] Server stop command sent")
+            print("  Waiting 5 seconds for graceful shutdown...")
+            import time
+            time.sleep(5)
+        print()
+        
         # Step 4: Backup notification
         print("[STEP 4] Creating backup (with Client API)...")
         print("  This may take several minutes depending on server size...")
@@ -110,9 +122,13 @@ def test_full_workflow(server_identifier="fe08f84f",
         print()
         
         # Step 6: Start server
-        print("[STEP 6] Backup complete!")
-        print("  Server continues running")
-        print("  Check Google Drive folder for uploaded backup")
+        print("[STEP 6] Starting server again...")
+        start_success = pterodactyl.start_server(server_identifier)
+        if not start_success:
+            print("[WARNING] Could not start server")
+        else:
+            print("[OK] Server start command sent")
+            print("  Server is starting up...")
         print()
         
         # Step 7: Show result
@@ -125,10 +141,18 @@ def test_full_workflow(server_identifier="fe08f84f",
         print(f"  Backup created and uploaded to Google Drive")
         print(f"  Check Google Drive folder for backup file")
         print()
+        print("Workflow steps completed:")
+        print("  1. Server stopped gracefully")
+        print("  2. Backup created via Pterodactyl")
+        print("  3. Backup uploaded to Google Drive (metadata)")
+        print("  4. Server restarted")
+        print()
         print("Endpoints used (all Client API):")
         print("  - GET /api/client/servers/{identifier}")
+        print("  - POST /api/client/servers/{identifier}/power (stop)")
         print("  - POST /api/client/servers/{identifier}/backups")
         print("  - GET /api/client/servers/{identifier}/backups/{backup_id}")
+        print("  - POST /api/client/servers/{identifier}/power (start)")
         print()
         
         return True

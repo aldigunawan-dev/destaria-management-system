@@ -431,19 +431,19 @@ class PterodactylClient:
     
     def start_server(self, server_id: str) -> bool:
         """
-        Start the server.
+        Start the server (Client API).
         
         Args:
-            server_id: Pterodactyl server ID
+            server_id: Pterodactyl server identifier
             
         Returns:
             True if successful, False otherwise
         """
         try:
-            # Application API uses DELETE with signal parameter
+            # Client API - POST with signal parameter
             result = self._make_request(
                 "POST",
-                f"/api/application/servers/{server_id}/power",
+                f"/api/client/servers/{server_id}/power",
                 data={"signal": "start"}
             )
             
@@ -459,30 +459,27 @@ class PterodactylClient:
     
     def stop_server(self, server_id: str) -> bool:
         """
-        Stop the server gracefully (Application API).
+        Stop the server gracefully (Client API).
         
         Args:
-            server_id: Pterodactyl server ID or identifier
+            server_id: Pterodactyl server identifier
             
         Returns:
             True if successful, False otherwise
         """
         try:
-            # Try with identifier first, then with numeric ID
-            endpoints = [
-                f"/api/application/servers/{server_id}/power?signal=stop",
-                f"/api/application/servers/{server_id}/power"  # With DELETE method
-            ]
+            # Client API - POST with signal parameter
+            result = self._make_request(
+                "POST",
+                f"/api/client/servers/{server_id}/power",
+                data={"signal": "stop"}
+            )
             
-            for endpoint in endpoints:
-                result = self._make_request("DELETE", endpoint)
-                
-                if result is not None:
-                    self.logger.info(f"Server stop command sent: {server_id}")
-                    return True
+            if result is None:
+                return False
             
-            self.logger.warning(f"Could not stop server {server_id}")
-            return False
+            self.logger.info(f"Server stop command sent: {server_id}")
+            return True
         
         except Exception as e:
             self.logger.error(f"Error stopping server {server_id}: {e}")

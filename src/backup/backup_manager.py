@@ -183,12 +183,26 @@ class BackupManager:
             self.logger.info(f"Starting full backup: {backup_id} for server {server_id}")
             self._update_progress(job_id, 5, "Triggering server backup")
             
-            # Step 1: Trigger backup on Pterodactyl
+            # Step 1: Trigger backup on Pterodactyl (with retry on rate limit)
             start_time = time.time()
-            backup_info = self.pterodactyl_client.create_backup(server_id)
+            backup_info = None
+            max_retries = 5
+            retry_delay = 5  # Start with 5 seconds
+            
+            for attempt in range(max_retries):
+                backup_info = self.pterodactyl_client.create_backup(server_id)
+                
+                if backup_info:
+                    break
+                
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"Backup trigger failed, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                    self._update_progress(job_id, 5, f"Retrying backup (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)  # Exponential backoff, max 60s
             
             if not backup_info:
-                raise Exception("Failed to trigger backup on Pterodactyl")
+                raise Exception("Failed to trigger backup on Pterodactyl after multiple retries")
             
             pterodactyl_backup_id = backup_info.get("uuid")
             self.logger.info(f"Pterodactyl backup created: {pterodactyl_backup_id}")
